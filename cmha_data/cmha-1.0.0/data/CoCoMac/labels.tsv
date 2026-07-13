@@ -1,0 +1,83 @@
+label	short_name	name	hemi	location
+2	TCpol	Tempolar polar 	Right	temporal cortex
+3	TCs	Superior temporal cortex	Right	temporal cortex
+4	Amyg	Amygdala 	Right	temporal cortex
+5	PFCoi	Orbitoinferior prefrontal cortex	Right	frontal cortex
+6	Ia	Anterior insula 	Right	insular cortex
+7	PFCom	Orbitomedial prefrontal cortex	Right	frontal cortex
+8	TCc	Central temporal cortex	Right	temporal cortex
+9	PFCol	Orbitolateral prefrontal cortex	Right	frontal cortex
+10	TCi	Inferior temporal 	Right	temporal cortex
+11	PHC	Parahippocampal cortex	Right	temporal cortex
+12	G	Gustatory cortex	Right	gustatory cortex
+13	PMCvl	Ventrolateral premotor cortex	Right	frontal cortex
+14	VACv	Anterior visual area (ventral)	Right	occipital cortex
+15	Ip	Posterior insula 	Right	insular cortex
+16	PFCpol	Prefrontal polar cortex	Right	frontal cortex
+17	HC	Hippocampus 	Right	temporal cortex
+18	CCs	Subgenual cingulate cortex	Right	cingulate cortex
+19	PFCvl	Ventrolateral prefrontal cortex	Right	frontal cortex
+20	V2	Visual area 2 	Right	occipital cortex
+21	PFCm	Medial prefrontal cortex	Right	frontal cortex
+22	TCv	Ventral temporal cortex	Right	temporal cortex
+23	VACd	Anterior visual area (dorsal)	Right	occipital cortex
+24	V1	Visual area 1 	Right	occipital cortex
+25	PFCcl	Centrolateral prefrontal cortex	Right	frontal cortex
+26	A2	Secondary auditory cortex	Right	temporal cortex
+27	CCr	Retrosplenial cingulate cortex	Right	cingulate cortex
+28	CCp	Posterior cingulate cortex	Right	cingulate cortex
+29	CCa	Anterior cingulate cortex	Right	cingulate cortex
+30	S2	Secondary somatosensory cortex	Right	parietal cortex
+31	S1	Primary somatosensory cortex	Right	parietal cortex
+32	A1	Primary auditory cortex	Right	temporal cortex
+33	M1	Primary motor cortex	Right	frontal cortex
+34	PCi	Inferior parietal cortex	Right	parietal cortex
+35	PCm	Medial parietal cortex	Right	parietal cortex
+36	PFCdm	Dorsomedial prefrontal cortex	Right	frontal cortex
+37	PCip	Intraparietal cortex	Right	parietal cortex
+38	PCs	Superior parietal cortex	Right	parietal cortex
+39	FEF	Frontal eye field 	Right	frontal cortex
+40	PFCdl	Dorsolateral prefrontal cortex	Right	frontal cortex
+41	PMCm	Medial premotor cortex	Right	frontal cortex
+42	PMCdl	Dorsolateral premotor cortex	Right	frontal cortex
+102	TCpol	Tempolar polar 	Left	temporal cortex
+103	TCs	Superior temporal cortex	Left	temporal cortex
+104	Amyg	Amygdala 	Left	temporal cortex
+105	PFCoi	Orbitoinferior prefrontal cortex	Left	frontal cortex
+106	Ia	Anterior insula 	Left	insular cortex
+107	PFCom	Orbitomedial prefrontal cortex	Left	frontal cortex
+108	TCc	Central temporal cortex	Left	temporal cortex
+109	PFCol	Orbitolateral prefrontal cortex	Left	frontal cortex
+110	TCi	Inferior temporal 	Left	temporal cortex
+111	PHC	Parahippocampal cortex	Left	temporal cortex
+112	G	Gustatory cortex	Left	gustatory cortex
+113	PMCvl	Ventrolateral premotor cortex	Left	frontal cortex
+114	VACv	Anterior visual area (ventral)	Left	occipital cortex
+115	Ip	Posterior insula 	Left	insular cortex
+116	PFCpol	Prefrontal polar cortex	Left	frontal cortex
+117	HC	Hippocampus 	Left	temporal cortex
+118	CCs	Subgenual cingulate cortex	Left	cingulate cortex
+119	PFCvl	Ventrolateral prefrontal cortex	Left	frontal cortex
+120	V2	Visual area 2 	Left	occipital cortex
+121	PFCm	Medial prefrontal cortex	Left	frontal cortex
+122	TCv	Ventral temporal cortex	Left	temporal cortex
+123	VACd	Anterior visual area (dorsal)	Left	occipital cortex
+124	V1	Visual area 1 	Left	occipital cortex
+125	PFCcl	Centrolateral prefrontal cortex	Left	frontal cortex
+126	A2	Secondary auditory cortex	Left	temporal cortex
+127	CCr	Retrosplenial cingulate cortex	Left	cingulate cortex
+128	CCp	Posterior cingulate cortex	Left	cingulate cortex
+129	CCa	Anterior cingulate cortex	Left	cingulate cortex
+130	S2	Secondary somatosensory cortex	Left	parietal cortex
+131	S1	Primary somatosensory cortex	Left	parietal cortex
+132	A1	Primary auditory cortex	Left	temporal cortex
+133	M1	Primary motor cortex	Left	frontal cortex
+134	PCi	Inferior parietal cortex	Left	parietal cortex
+135	PCm	Medial parietal cortex	Left	parietal cortex
+136	PFCdm	Dorsomedial prefrontal cortex	Left	frontal cortex
+137	PCip	Intraparietal cortex	Left	parietal cortex
+138	PCs	Superior parietal cortex	Left	parietal cortex
+139	FEF	Frontal eye field 	Left	frontal cortex
+140	PFCdl	Dorsolateral prefrontal cortex	Left	frontal cortex
+141	PMCm	Medial premotor cortex	Left	frontal cortex
+142	PMCdl	Dorsolateral premotor cortex	Left	frontal cortex
