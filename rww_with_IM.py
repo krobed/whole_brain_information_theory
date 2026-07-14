@@ -1,5 +1,6 @@
 
 import os
+os.environ["JAX_ENABLE_X64"] = "True"
 import time
 cpu = True
 if cpu:
@@ -53,21 +54,65 @@ import argparse
 from helpers import *
 
 args = argparse.ArgumentParser()
-args.add_argument('-measure', type=str ,default='fc')
-args.add_argument('-order', type=int ,default=2) # Order of the information measure. Note that for functional connectivity (correaltion) and PhiID computations order=2, whereas for HOI order>=3.
+args.add_argument('--measure', type=str ,default='fc')
+args.add_argument('--order', type=int ,default=2) # Order of the information measure. Note that for functional connectivity (correaltion) and PhiID computations order=2, whereas for HOI order>=3.
+args.add_argument('--state', type=str,default='awake')
 
-def compute_metric(name, data, skip_t):
-    if name == 'fc':
+ATOM_INDEX = {
+    "rtr": 0,
+    "rtu1": 1,
+    "rtu2": 2,
+    "rts": 3,
+
+    "u1tr": 4,
+    "u1tu1": 5,
+    "u1tu2": 6,
+    "u1ts": 7,
+
+    "u2tr": 8,
+    "u2tu1": 9,
+    "u2tu2": 10,
+    "u2ts": 11,
+
+    "str": 12,
+    "stu1": 13,
+    "stu2": 14,
+    "sts": 15,
+}
+
+
+def compute_metric(name, data, skip_t=20, order = 2):
+    if name == 'FC':
         return compute_fc(data,skip_t)
-    if name == 'transfer_entropy':
-        return 
+    elif name == 'TE':
+        atoms = {"Transfer Entropy":{"add": ["u1tr","u1tu2","str","stu2"], "sub": []}}
+    elif name == 'WMS':
+        atoms = {"Phi_WMS": {"add": ["rts", "u1tu2", "u1ts", "u2tu1", "u2ts", "str", "stu1", "stu2", "sts"],"sub": ["rtr"]}}
+    elif name == 'PhiR':
+        atoms = {"Phi_R": {"add": ["rts", "u1tu2", "u1ts", "u2tu1", "u2ts", "str", "stu1", "stu2", "sts"], "sub": [] }}
+    elif name == 'S':
+        return phiid_byatoms(data)
+    elif name == 'R':
+        return redundancy_phiid(data)
+    elif name == 'PhiG':
+        atoms = {"Phi_G": {"add":["stu1","str","u1tu2","u1tr"], "sub":[]}}
+    elif name == 'CD':
+        atoms = {"Causal Density": {"add": ["u1tr","u1tu2","u2tr","u2tu1","stu1","stu2","str","str"],"sub": []}}
+    elif name == 'Oinfo':
+        return get_Oinfo(data, minsize=3, maxsize=order)
+    else:
+        return "Name didn't match any configuration"
+    return compute_phiid_measures(data, ATOM_INDEX, atoms)[list(atoms.keys())[0]]
+
 
 if __name__ == '__main__':
     # Parse arguments
-    args = args.parse_args
+    args = args.parse_args()
     measure = args.measure
     order = args.order
-
+    con_state = args.state
+    
+    os.makedirs(f"results/{measure}", exist_ok=True)
     # --- Detect environment ---
     if "google.colab" in sys.modules:
         base_path = "/content/cmha_data"
@@ -146,7 +191,7 @@ if __name__ == '__main__':
     for state in all_states:
         emp_fc = np.mean([np.corrcoef(all_states[state][n].T) for n in all_states[state]], axis=0)
         fig, ax1 = plt.subplots(1, figsize=(8.1, 4.05), sharey=True)
-        im1 = ax1.imshow(emp_fc, cmap="cividis", vmax=0.5)
+        im1 = ax1.imshow(emp_fc, cmap="cividis")
         ax1.set_title(f"Functional Connectivity {state} state")
         ax1.set_xlabel("Region")
         ax1.set_ylabel("Region")
@@ -155,7 +200,7 @@ if __name__ == '__main__':
     model = ReducedWongWang()
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.1, 4.05), sharey=True)
-    im1 = ax1.imshow(conn.weights, cmap="cividis", vmax=1)
+    im1 = ax1.imshow(conn.weights, cmap="cividis")
     ax1.set_title("Structural Connectivity")
     ax1.set_xlabel("Region")
     ax1.set_ylabel("Region")
@@ -167,6 +212,8 @@ if __name__ == '__main__':
     cbar2 = fig.colorbar(im2, ax=ax2, shrink=0.74, label="Tract Length [mm]")
 
     plt.tight_layout()
+    plt.savefig(f"results/{measure}/structural_conn.png")
+
     graph = DenseGraph(conn.weights, region_labels=conn.region_labels)
     dynamics = ReducedWongWang(w=0.3, I_o=0.32, INITIAL_STATE=(0.3,))
     coupling = FastLinearCoupling(local_states=["S"], G=0.15)
@@ -244,18 +291,127 @@ if __name__ == '__main__':
     ax2.set_ylabel("BOLD [a.u.]")
 
     plt.tight_layout()
+    plt.savefig(f"results/{measure}/bold_signal.png")
+
+    if measure == 'FC':        
+        fc_target = np.corrcoef(all_states[con_state][1].T)
+        def observation(state):
+            """Compute functional connectivity from simulated BOLD signal."""
+            constrained_state = copy.deepcopy(state)
+    
+            # Force Excitatory Recurrence (w) to be strictly positive:
+            # softplus(x) = log(1 + exp(x))
+            constrained_state.dynamics.w = jax.nn.softplus(state.dynamics.w)
+            
+            # Optionally force external input (I_o) to be strictly positive as well:
+            if hasattr(state.dynamics, 'I_o'):
+                constrained_state.dynamics.I_o = jax.nn.softplus(state.dynamics.I_o)
+            
+            # Force Global Coupling (G) to be strictly positive:
+            constrained_state.coupling.instant.G = jax.nn.softplus(state.coupling.instant.G)
+            # Run simulation
+            result = model(constrained_state)
+            # Convert to BOLD
+            bold = bold_monitor(result)
+            # Compute FC, skipping first 20 TRs to avoid transient effects
+            fc = compute_fc(bold, skip_t=20)
+            return fc
+
+        def loss(state):
+            """Compute RMSE between simulated and empirical FC."""
+            fc = observation(state)
+            return rmse(fc, fc_target)
+    else:
+        # Information metrics (like HOI/PhiID) might strictly expect (Time, Nodes).
+        # We transpose the already-sliced array safely to (480, 82) and bypass tvboptim's internal skip.
+        fc_target = compute_metric(measure, all_states[con_state][1], order=order).astype(np.float32)
+
+        @jax.custom_vjp
+        def differentiable_metric_callback(data_array):
+            """Wraps the pure callback so JAX handles it normally during forward passes."""
+            def callback_worker(data_np):
+                # Always return as float32 to prevent promotion warnings
+                return compute_metric(measure, data_np, order=order).astype(np.float32)
+                
+            expected_struct = jax.ShapeDtypeStruct(
+                shape=fc_target.shape, 
+                dtype=jnp.float32
+            )
+            
+            return jax.pure_callback(
+                callback_worker, 
+                expected_struct, 
+                data_array, 
+                vmap_method='sequential'
+            )
 
 
-    fc_target = np.corrcoef(all_states['awake'][1].T)
-    def observation(state):
-        """Compute functional connectivity from simulated BOLD signal."""
-        # Run simulation
-        result = model(state)
-        # Convert to BOLD
-        bold = bold_monitor(result)
-        # Compute FC, skipping first 20 TRs to avoid transient effects
-        fc = compute_info_measure(bold, skip_t=20)
-        return fc
+        def differentiable_metric_callback_fwd(data_array):
+            primal_out = differentiable_metric_callback(data_array)
+            return primal_out, data_array
+
+
+        def differentiable_metric_callback_bwd(res, cotangent):
+            """
+            res: data_array from the simulation -> shape (90, 82)
+            cotangent: incoming gradient from the loss function -> shape matches fc_target (e.g., 82, 82)
+            """
+            data_array = res
+            epsilon = 1  # Step size for numerical finite difference
+            
+            # --- STEP 1: Dynamically Map Cotangent to (Time, Nodes) Space ---
+            # Instead of a static flat mean, we project the loss gradients back 
+            # into the time-domain using the data_array's temporal profile.
+            if cotangent.ndim >= 2:
+                # If cotangent is (82, 82), multiply with data_array (90, 82) 
+                # to map spatial errors back to temporal variations: (90, 82) @ (82, 82) -> (90, 82)
+                gradient_time_series = jnp.matmul(data_array, cotangent)
+            else:
+                # If cotangent is flat (e.g., HOI metrics or O-info vectors), 
+                # we project it dynamically using the temporal variance of each node.
+                # This ensures we perturb the dynamic features (variance) the metrics care about.
+                std_devs = jnp.std(data_array, axis=0, keepdims=True)  # (1, 82)
+                mean_gradient = jnp.mean(cotangent)
+                gradient_time_series = data_array * (mean_gradient / (std_devs + 1e-8))
+
+            # Normalize the perturbation vector so we don't explode or underflow the simulation space
+            grad_norm = jnp.linalg.norm(gradient_time_series) + 1e-8
+            perturbation = (gradient_time_series / grad_norm) * jnp.std(data_array)
+
+            # --- STEP 2: Perturb over space AND time ---
+            perturbed_data = data_array + epsilon * perturbation
+            
+            # --- STEP 3: Forward evaluations ---
+            perturbed_out = differentiable_metric_callback(perturbed_data)
+            primal_out = differentiable_metric_callback(data_array)
+            
+            # --- STEP 4: Project back to the exact shape of the simulation input ---
+            delta_metric = (perturbed_out - primal_out) / epsilon
+        
+            # Print diagnostic (this should now show non-zero values!)
+            jax.debug.print("Max gradient value in backward pass: {x}", x=jnp.max(jnp.abs(delta_metric)))
+            
+            # Backpropagate the dynamic changes to the parameters
+            vjp_out = jnp.ones_like(data_array) * jnp.mean(delta_metric)
+            return (vjp_out,)
+
+
+        differentiable_metric_callback.defvjp(
+            differentiable_metric_callback_fwd, 
+            differentiable_metric_callback_bwd
+        )
+
+
+        def observation(state):
+            """Compute metric from simulated BOLD signal."""
+        
+            result = model(state)
+            bold = bold_monitor(result)
+            data = bold.data.squeeze()
+            
+            fc = differentiable_metric_callback(data)
+            return fc
+
 
     def loss(state):
         """Compute RMSE between simulated and empirical FC."""
@@ -264,16 +420,16 @@ if __name__ == '__main__':
 
 
     # Calculate initial FC
-    fc_initial = np.array(observation(state))
+    fc_initial = np.array(observation(state)).astype(np.float32)
 
     # Create figure
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.1, 3.54375))
+    fig, (ax1, ax2) = plt.subplots(1, 2)
 
     # Plot both FC matrices
     for ax_current, fc_matrix, title_prefix in zip([ax1, ax2], [fc_target, fc_initial], ["Target FC", "Initial FC"]):
         fc_matrix = np.copy(fc_matrix)
         np.fill_diagonal(fc_matrix, np.nan)  # Set diagonal to NaN
-        im = ax_current.imshow(fc_matrix, cmap='cividis', vmax=0.9)
+        im = ax_current.imshow(fc_matrix, cmap='cividis')
 
         ax_current.set_xticks([])
         ax_current.set_yticks([])
@@ -298,7 +454,7 @@ if __name__ == '__main__':
                                     facecolor='white', alpha=0.9))
 
     plt.tight_layout()
-
+    plt.savefig(f"results/{measure}/initial_corr.png")
     # Create grid for parameter exploration
     n = 16
 
@@ -348,6 +504,7 @@ if __name__ == '__main__':
     ax.set_title("Parameter Exploration")
 
     plt.tight_layout()
+    plt.savefig(f"results/{measure}/expl_results.png")
 
     # Mark parameters as optimizable
     state.coupling.instant.G = Parameter(state.coupling.instant.G)
@@ -424,6 +581,7 @@ if __name__ == '__main__':
     ax.set_ylabel('')
 
     plt.tight_layout()
+    plt.savefig(f"results/{measure}/global_optimization.png")
 
     fitted_state_het = copy.deepcopy(fitted_state)
 
@@ -443,7 +601,7 @@ if __name__ == '__main__':
     @cache("optimize_het", redo=True)
     def optimize_het():
         opt = OptaxOptimizer(loss, optax.adam(0.004, b2=0.999), callback=cb)
-        fitted_state, fitting_data = opt.run(fitted_state_het, max_steps=2000)
+        fitted_state, fitting_data = opt.run(fitted_state_het, max_steps=1000)
         return fitted_state, fitting_data
 
     fitted_state_het, fitting_data_het = optimize_het()
@@ -461,7 +619,7 @@ if __name__ == '__main__':
     for ax_current, fc_matrix, title_prefix in zip([ax1, ax2, ax3], [fc_target, fc_global, fc_regional], ["Target FC", "Global Parameters", "Regional Parameters"]):
         fc_matrix = np.copy(fc_matrix)
         np.fill_diagonal(fc_matrix, np.nan)  # Set diagonal to NaN
-        im = ax_current.imshow(fc_matrix, cmap='cividis', vmax=1.0)
+        im = ax_current.imshow(fc_matrix, cmap='cividis')
 
         ax_current.set_xticks([])
         ax_current.set_yticks([])
@@ -482,7 +640,7 @@ if __name__ == '__main__':
         ax_current.set_title(title, fontsize=10, fontweight='bold')
 
     plt.tight_layout()
-
+    plt.savefig(f"results/{measure}/global_regional_results.png")
 
     # Create figure with two scatter plots
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.1, 5.4), sharey=True, sharex=True)
@@ -520,7 +678,7 @@ if __name__ == '__main__':
     ax2.set_aspect('equal', adjustable='box')
 
     plt.tight_layout()
-
+    plt.savefig(f"results/{measure}/FC_final.png")
 
     # Calculate mean incoming connectivity for each region
     mean_connectivity = np.mean(conn.weights, axis=1)
@@ -555,5 +713,5 @@ if __name__ == '__main__':
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
-
+    plt.savefig(f"results/{measure}/weight_results.png")
 

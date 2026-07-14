@@ -13,22 +13,35 @@ def get_Oinfo(subject_ts, minsize=2,maxsize=2):
     model = Oinfo(subject_ts)
 
     oi_values = model.fit(minsize=minsize, maxsize=maxsize)
-    return oi_values,model
+    return oi_values
 
-def phiid_byatoms(subject_ts, atoms=['sts'], interaction_size=2):
+def phiid_byatoms(subject_ts, atoms=['sts']):
     model_group = AtomsPhiID(subject_ts, verbose=False)
-    res = model_group.fit(atoms=atoms, minsize=interaction_size, maxsize=interaction_size)
+    res = model_group.fit(atoms=atoms, minsize=2,maxsize=2)
+    n_features = 82
+    interaction_matrix = np.zeros((n_features, n_features))
 
-    return res, model_group
+    # 1. Map the 1D output back into a 2D symmetric matrix
+    for (i, j), val in zip(model_group.multiplets, res):
+        # val is a 1-element array, so we take val[0]
+        interaction_matrix[i, j] = val[0]
+        interaction_matrix[j, i] = val[0] # Make it symmetric
+    return interaction_matrix
 
-def redundancy_phiid(subject_ts, interaction_size):
-        
+def redundancy_phiid(subject_ts, interaction_size=2):
     # Slice data using the combination indices (cast tuple to list for proper indexing)
     model_group = RedundancyphiID(subject_ts, verbose=False)
     res = model_group.fit(minsize=interaction_size, maxsize=interaction_size)
     # Save results using the combination tuple as the key
+    n_features = 82
+    interaction_matrix = np.zeros((n_features, n_features))
 
-    return res, model_group
+    # 1. Map the 1D output back into a 2D symmetric matrix
+    for (i, j), val in zip(model_group.multiplets, res):
+        # val is a 1-element array, so we take val[0]
+        interaction_matrix[i, j] = val[0]
+        interaction_matrix[j, i] = val[0] # Make it symmetric
+    return interaction_matrix
 
 def plot_2d_phiid(results,model,n_features):
     matrix_to_plot = np.zeros((n_features, n_features))
@@ -53,7 +66,6 @@ def compute_phiid_measures(subject_ts, ATOM_INDEX, MEASURES, n_features=None):
     subject_ts : (T, N)
     returns    : dict {measure_name: scalar}
     """
-
     phiid = hoi.metrics.AtomsPhiID(subject_ts, verbose= False)
 
     # 1. Compute ALL atoms once
@@ -86,12 +98,7 @@ def compute_phiid_measures(subject_ts, ATOM_INDEX, MEASURES, n_features=None):
     for measure, spec in MEASURES.items():
         M = np.zeros(N)
 
-        for atom in spec["add"]:
-            M += atom_values[atom]
-
-        for atom in spec["sub"]:
-            M -= atom_values[atom]
-
+        M=compute_measure(atom_values,spec,M)
         results[measure] = M
         
         # Initialize the square matrix
@@ -103,4 +110,12 @@ def compute_phiid_measures(subject_ts, ATOM_INDEX, MEASURES, n_features=None):
         
         interaction_matrix[measure] = mat
 
-    return results, interaction_matrix
+    return interaction_matrix
+
+def compute_measure(atom_values, spec, M):
+    for atom in spec["add"]:
+        M += atom_values[atom]
+
+    for atom in spec["sub"]:
+        M -= atom_values[atom]
+    return M
