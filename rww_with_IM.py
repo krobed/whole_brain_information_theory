@@ -50,18 +50,23 @@ import sys
 import urllib
 import zipfile
 import argparse
+from helpers import *
 
 args = argparse.ArgumentParser()
 args.add_argument('-measure', type=str ,default='fc')
 args.add_argument('-order', type=int ,default=2) # Order of the information measure. Note that for functional connectivity (correaltion) and PhiID computations order=2, whereas for HOI order>=3.
+
+def compute_metric(name, data, skip_t):
+    if name == 'fc':
+        return compute_fc(data,skip_t)
+    if name == 'transfer_entropy':
+        return 
 
 if __name__ == '__main__':
     # Parse arguments
     args = args.parse_args
     measure = args.measure
     order = args.order
-
-
 
     # --- Detect environment ---
     if "google.colab" in sys.modules:

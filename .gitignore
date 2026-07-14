@@ -1,1 +1,4 @@
-./cmha_data
+cmha_data
+__pycache__
+cache
+.vscode
