@@ -17,9 +17,6 @@ import copy
 import optax
 from scipy import io
 
-# Jax enable x64
-jax.config.update("jax_enable_x64", True)
-
 # Import from tvboptim
 from tvboptim.types import Parameter, Space, GridAxis
 from tvboptim.types.stateutils import show_parameters
@@ -54,7 +51,7 @@ import argparse
 from helpers import *
 
 args = argparse.ArgumentParser()
-args.add_argument('--measure', type=str ,default='fc')
+args.add_argument('--measure', type=str ,default='FC')
 args.add_argument('--order', type=int ,default=2) # Order of the information measure. Note that for functional connectivity (correaltion) and PhiID computations order=2, whereas for HOI order>=3.
 args.add_argument('--state', type=str,default='awake')
 
@@ -297,24 +294,29 @@ if __name__ == '__main__':
         fc_target = np.corrcoef(all_states[con_state][1].T)
         def observation(state):
             """Compute functional connectivity from simulated BOLD signal."""
-            constrained_state = copy.deepcopy(state)
+            state.dynamics.w = jax.nn.softplus(state.dynamics.w)
     
-            # Force Excitatory Recurrence (w) to be strictly positive:
-            # softplus(x) = log(1 + exp(x))
-            constrained_state.dynamics.w = jax.nn.softplus(state.dynamics.w)
-            
-            # Optionally force external input (I_o) to be strictly positive as well:
+            # Force external input (I_o) to be strictly positive if it exists:
             if hasattr(state.dynamics, 'I_o'):
-                constrained_state.dynamics.I_o = jax.nn.softplus(state.dynamics.I_o)
+                state.dynamics.I_o = jax.nn.softplus(state.dynamics.I_o)
             
             # Force Global Coupling (G) to be strictly positive:
-            constrained_state.coupling.instant.G = jax.nn.softplus(state.coupling.instant.G)
-            # Run simulation
-            result = model(constrained_state)
+            state.coupling.instant.G = jax.nn.softplus(state.coupling.instant.G)
+
+            # --- Run simulation with the modified state ---
+            result = model(state)
+            
             # Convert to BOLD
             bold = bold_monitor(result)
-            # Compute FC, skipping first 20 TRs to avoid transient effects
-            fc = compute_fc(bold, skip_t=20)
+            
+            if measure == 'FC':
+                # Compute FC, skipping first 20 TRs to avoid transient effects
+                fc = compute_fc(bold, skip_t=20)
+            else:
+                # Information metrics
+                data = bold.data.squeeze()
+                fc = differentiable_metric_callback(data)
+                
             return fc
 
         def loss(state):
@@ -324,18 +326,17 @@ if __name__ == '__main__':
     else:
         # Information metrics (like HOI/PhiID) might strictly expect (Time, Nodes).
         # We transpose the already-sliced array safely to (480, 82) and bypass tvboptim's internal skip.
-        fc_target = compute_metric(measure, all_states[con_state][1], order=order).astype(np.float32)
+        fc_target = compute_metric(measure, all_states[con_state][1], order=order)
 
         @jax.custom_vjp
         def differentiable_metric_callback(data_array):
             """Wraps the pure callback so JAX handles it normally during forward passes."""
             def callback_worker(data_np):
-                # Always return as float32 to prevent promotion warnings
-                return compute_metric(measure, data_np, order=order).astype(np.float32)
+                return compute_metric(measure, data_np, order=order)
                 
             expected_struct = jax.ShapeDtypeStruct(
-                shape=fc_target.shape, 
-                dtype=jnp.float32
+                shape=fc_target.shape,
+                dtype=jnp.float64
             )
             
             return jax.pure_callback(
@@ -420,7 +421,7 @@ if __name__ == '__main__':
 
 
     # Calculate initial FC
-    fc_initial = np.array(observation(state)).astype(np.float32)
+    fc_initial = np.array(observation(state))
 
     # Create figure
     fig, (ax1, ax2) = plt.subplots(1, 2)
