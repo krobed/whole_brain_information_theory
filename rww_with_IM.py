@@ -80,7 +80,7 @@ ATOM_INDEX = {
 
 def compute_metric(name, data, skip_t=20, order = 2):
     if name == 'FC':
-        return compute_fc(data,skip_t)
+        return compute_fc(data,skip_t=skip_t)
     elif name == 'TE':
         atoms = {"Transfer Entropy":{"add": ["u1tr","u1tu2","str","stu2"], "sub": []}}
     elif name == 'WMS':
@@ -292,16 +292,96 @@ if __name__ == '__main__':
 
     if measure == 'FC':        
         fc_target = np.corrcoef(all_states[con_state][1].T)
-        def observation(state):
-            """Compute functional connectivity from simulated BOLD signal."""
-            state.dynamics.w = jax.nn.softplus(state.dynamics.w)
-    
-            # Force external input (I_o) to be strictly positive if it exists:
-            if hasattr(state.dynamics, 'I_o'):
-                state.dynamics.I_o = jax.nn.softplus(state.dynamics.I_o)
+    else:
+        # Information metrics (like HOI/PhiID) might strictly expect (Time, Nodes).
+        # We transpose the already-sliced array safely to (480, 82) and bypass tvboptim's internal skip.
+        fc_target = compute_metric(measure, all_states[con_state][1], order=order)
+
+    @jax.custom_vjp
+    def differentiable_metric_callback(data_array):
+        """Wraps the pure callback so JAX handles it normally during forward passes."""
+        def callback_worker(data_np):
+            return compute_metric(measure, data_np, order=order)
             
-            # Force Global Coupling (G) to be strictly positive:
-            state.coupling.instant.G = jax.nn.softplus(state.coupling.instant.G)
+        expected_struct = jax.ShapeDtypeStruct(
+            shape=fc_target.shape,
+            dtype=jnp.float64
+        )
+        
+        return jax.pure_callback(
+            callback_worker, 
+            expected_struct, 
+            data_array, 
+            vmap_method='sequential'
+        )
+
+
+    def differentiable_metric_callback_fwd(data_array):
+        primal_out = differentiable_metric_callback(data_array)
+        return primal_out, data_array
+
+
+    def differentiable_metric_callback_bwd(res, cotangent):
+        """
+        res: data_array from the simulation -> shape (90, 82)
+        cotangent: incoming gradient from the loss function -> shape matches fc_target (e.g., 82, 82)
+        """
+        data_array = res
+        epsilon = 1  # Step size for numerical finite difference
+        
+        # --- STEP 1: Dynamically Map Cotangent to (Time, Nodes) Space ---
+        # Instead of a static flat mean, we project the loss gradients back 
+        # into the time-domain using the data_array's temporal profile.
+        if cotangent.ndim >= 2:
+            # If cotangent is (82, 82), multiply with data_array (90, 82) 
+            # to map spatial errors back to temporal variations: (90, 82) @ (82, 82) -> (90, 82)
+            gradient_time_series = jnp.matmul(data_array, cotangent)
+        else:
+            # If cotangent is flat (e.g., HOI metrics or O-info vectors), 
+            # we project it dynamically using the temporal variance of each node.
+            # This ensures we perturb the dynamic features (variance) the metrics care about.
+            std_devs = jnp.std(data_array, axis=0, keepdims=True)  # (1, 82)
+            mean_gradient = jnp.mean(cotangent)
+            gradient_time_series = data_array * (mean_gradient / (std_devs + 1e-8))
+
+        # Normalize the perturbation vector so we don't explode or underflow the simulation space
+        grad_norm = jnp.linalg.norm(gradient_time_series) + 1e-8
+        perturbation = (gradient_time_series / grad_norm) * jnp.std(data_array)
+
+        # --- STEP 2: Perturb over space AND time ---
+        perturbed_data = data_array + epsilon * perturbation
+        
+        # --- STEP 3: Forward evaluations ---
+        perturbed_out = differentiable_metric_callback(perturbed_data)
+        primal_out = differentiable_metric_callback(data_array)
+        
+        # --- STEP 4: Project back to the exact shape of the simulation input ---
+        delta_metric = (perturbed_out - primal_out) / epsilon
+    
+        # Print diagnostic (this should now show non-zero values!)
+        jax.debug.print("Max gradient value in backward pass: {x}", x=jnp.max(jnp.abs(delta_metric)))
+        
+        # Backpropagate the dynamic changes to the parameters
+        vjp_out = jnp.ones_like(data_array) * jnp.mean(delta_metric)
+        return (vjp_out,)
+
+
+    differentiable_metric_callback.defvjp(
+        differentiable_metric_callback_fwd, 
+        differentiable_metric_callback_bwd
+    )
+
+
+    def observation(state):
+            """Compute functional connectivity from simulated BOLD signal."""
+            # state.dynamics.w = jax.nn.softplus(state.dynamics.w)
+    
+            # # Force external input (I_o) to be strictly positive if it exists:
+            # if hasattr(state.dynamics, 'I_o'):
+            #     state.dynamics.I_o = jax.nn.softplus(state.dynamics.I_o)
+            
+            # # Force Global Coupling (G) to be strictly positive:
+            # state.coupling.instant.G = jax.nn.softplus(state.coupling.instant.G)
 
             # --- Run simulation with the modified state ---
             result = model(state)
@@ -319,105 +399,11 @@ if __name__ == '__main__':
                 
             return fc
 
-        def loss(state):
-            """Compute RMSE between simulated and empirical FC."""
-            fc = observation(state)
-            return rmse(fc, fc_target)
-    else:
-        # Information metrics (like HOI/PhiID) might strictly expect (Time, Nodes).
-        # We transpose the already-sliced array safely to (480, 82) and bypass tvboptim's internal skip.
-        fc_target = compute_metric(measure, all_states[con_state][1], order=order)
-
-        @jax.custom_vjp
-        def differentiable_metric_callback(data_array):
-            """Wraps the pure callback so JAX handles it normally during forward passes."""
-            def callback_worker(data_np):
-                return compute_metric(measure, data_np, order=order)
-                
-            expected_struct = jax.ShapeDtypeStruct(
-                shape=fc_target.shape,
-                dtype=jnp.float64
-            )
-            
-            return jax.pure_callback(
-                callback_worker, 
-                expected_struct, 
-                data_array, 
-                vmap_method='sequential'
-            )
-
-
-        def differentiable_metric_callback_fwd(data_array):
-            primal_out = differentiable_metric_callback(data_array)
-            return primal_out, data_array
-
-
-        def differentiable_metric_callback_bwd(res, cotangent):
-            """
-            res: data_array from the simulation -> shape (90, 82)
-            cotangent: incoming gradient from the loss function -> shape matches fc_target (e.g., 82, 82)
-            """
-            data_array = res
-            epsilon = 1  # Step size for numerical finite difference
-            
-            # --- STEP 1: Dynamically Map Cotangent to (Time, Nodes) Space ---
-            # Instead of a static flat mean, we project the loss gradients back 
-            # into the time-domain using the data_array's temporal profile.
-            if cotangent.ndim >= 2:
-                # If cotangent is (82, 82), multiply with data_array (90, 82) 
-                # to map spatial errors back to temporal variations: (90, 82) @ (82, 82) -> (90, 82)
-                gradient_time_series = jnp.matmul(data_array, cotangent)
-            else:
-                # If cotangent is flat (e.g., HOI metrics or O-info vectors), 
-                # we project it dynamically using the temporal variance of each node.
-                # This ensures we perturb the dynamic features (variance) the metrics care about.
-                std_devs = jnp.std(data_array, axis=0, keepdims=True)  # (1, 82)
-                mean_gradient = jnp.mean(cotangent)
-                gradient_time_series = data_array * (mean_gradient / (std_devs + 1e-8))
-
-            # Normalize the perturbation vector so we don't explode or underflow the simulation space
-            grad_norm = jnp.linalg.norm(gradient_time_series) + 1e-8
-            perturbation = (gradient_time_series / grad_norm) * jnp.std(data_array)
-
-            # --- STEP 2: Perturb over space AND time ---
-            perturbed_data = data_array + epsilon * perturbation
-            
-            # --- STEP 3: Forward evaluations ---
-            perturbed_out = differentiable_metric_callback(perturbed_data)
-            primal_out = differentiable_metric_callback(data_array)
-            
-            # --- STEP 4: Project back to the exact shape of the simulation input ---
-            delta_metric = (perturbed_out - primal_out) / epsilon
-        
-            # Print diagnostic (this should now show non-zero values!)
-            jax.debug.print("Max gradient value in backward pass: {x}", x=jnp.max(jnp.abs(delta_metric)))
-            
-            # Backpropagate the dynamic changes to the parameters
-            vjp_out = jnp.ones_like(data_array) * jnp.mean(delta_metric)
-            return (vjp_out,)
-
-
-        differentiable_metric_callback.defvjp(
-            differentiable_metric_callback_fwd, 
-            differentiable_metric_callback_bwd
-        )
-
-
-        def observation(state):
-            """Compute metric from simulated BOLD signal."""
-        
-            result = model(state)
-            bold = bold_monitor(result)
-            data = bold.data.squeeze()
-            
-            fc = differentiable_metric_callback(data)
-            return fc
-
-
     def loss(state):
         """Compute RMSE between simulated and empirical FC."""
         fc = observation(state)
         return rmse(fc, fc_target)
+   
 
 
     # Calculate initial FC
@@ -461,8 +447,8 @@ if __name__ == '__main__':
 
     # Set up parameter axes for exploration
     grid_state = copy.deepcopy(state)
-    grid_state.dynamics.w = GridAxis(0.001, 0.7, n)
-    grid_state.coupling.instant.G = GridAxis(0.001, 0.7, n)
+    grid_state.dynamics.w = GridAxis(0.001, 1.0, n)
+    grid_state.coupling.instant.G = GridAxis(0.001, 1.0, n)
 
     # Create space (product creates all combinations of w and G)
     grid = Space(grid_state, mode="product")
@@ -524,20 +510,28 @@ if __name__ == '__main__':
 
     fitted_state, fitting_data = optimize()
 
+# Locate the block where you extract G_route and w_route and update it to:
+    
+    # 1. Extract raw parameters from fitting data
+    raw_G_route = np.array([ds.coupling.instant.G.value for ds in fitting_data["state"].save])
+    raw_w_route = np.array([ds.dynamics.w.value for ds in fitting_data["state"].save])
+    
+    # 2. Map raw parameters back to the constrained physical space used by the model
+    # (Sigmoid transformations to match your observation constraints)
+    G_route = 1.0 * (1.0 / (1.0 + np.exp(-raw_G_route)))
+    w_route = 1.5 * (1.0 / (1.0 + np.exp(-raw_w_route)))
+    
+    # 3. Apply the same mapping to the single "Initial" and "Optimized" markers
+    G_init = 1.0 * (1.0 / (1.0 + np.exp(-state.coupling.instant.G.value)))
+    w_init = 1.5 * (1.0 / (1.0 + np.exp(-state.dynamics.w.value)))
+    
+    G_fit = 1.0 * (1.0 / (1.0 + np.exp(-fitted_state.coupling.instant.G.value)))
+    w_fit = 1.5 * (1.0 / (1.0 + np.exp(-fitted_state.dynamics.w.value)))
 
-    # Prepare data for visualization
-    pc = grid.collect()
-    G_vals = pc.coupling.instant.G
-    w_vals = pc.dynamics.w
-
-    # Get parameter ranges
-    G_min, G_max = min(G_vals), max(G_vals)
-    w_min, w_max = min(w_vals), max(w_vals)
-
-    # Create figure and axis
+    # --- Plotting Code ---
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    # Create the heatmap
+    # Replot the exploration heatmap
     im = ax.imshow(jnp.stack(exploration_results).reshape(n, n).T,
                 cmap='cividis_r',
                 extent=[G_min, G_max, w_min, w_max],
@@ -545,41 +539,29 @@ if __name__ == '__main__':
                 aspect='auto',
                 interpolation='none')
 
-    # Mark initial value
-    G_init = state.coupling.instant.G.value
-    w_init = state.dynamics.w.value
+    # Draw the corrected, mapped routes and endpoints
     ax.scatter(G_init, w_init, color='white', s=100, marker='o',
             edgecolors='k', linewidths=2, zorder=5)
-
-    # Add annotation
     ax.annotate('Initial', xy=(G_init, w_init),
                 xytext=(G_init, w_init+0.05*(w_max-w_min)),
                 color='white', fontweight='bold', ha='center', zorder=5,
                 path_effects=[path_effects.withStroke(linewidth=3, foreground='black')])
 
-    # Add fitted value point
-    G_fit = fitted_state.coupling.instant.G.value
-    w_fit = fitted_state.dynamics.w.value
     ax.scatter(G_fit, w_fit, color='white', s=100, marker='o',
             edgecolors='k', linewidths=2, zorder=5)
-
-    # Add annotation for the fitted value
     ax.annotate('Optimized', xy=(G_fit, w_fit),
                 xytext=(G_fit, w_fit-0.08*(w_max-w_min)),
                 color='white', fontweight='bold', ha='center', zorder=5,
                 path_effects=[path_effects.withStroke(linewidth=3, foreground='black')])
 
-    # Add optimization path points
-    G_route = np.array([ds.coupling.instant.G.value for ds in fitting_data["state"].save])
-    w_route = np.array([ds.dynamics.w.value for ds in fitting_data["state"].save])
+    # Draw the path
     ax.scatter(G_route[::2], w_route[::2], color='white', s=15, marker='o',
             linewidths=1, zorder=4, edgecolors='k')
 
-    # Remove axes ticks and labels
-    # ax.set_xticks([])
-    # ax.set_yticks([])
-    ax.set_xlabel('')
-    ax.set_ylabel('')
+    # Retain your custom axis limit rules
+
+    ax.set_xlabel('Global Coupling (G)')
+    ax.set_ylabel('Excitatory Recurrence (w)')
 
     plt.tight_layout()
     plt.savefig(f"results/{measure}/global_optimization.png")
@@ -683,14 +665,18 @@ if __name__ == '__main__':
 
     # Calculate mean incoming connectivity for each region
     mean_connectivity = np.mean(conn.weights, axis=1)
-
+    def get_val(param):
+        if hasattr(param, 'value'):
+            return np.array(param.value)
+        return np.array(param)
+    
     # Extract fitted regional parameters
-    w_fitted = fitted_state_het.dynamics.w.value.flatten()
-    I_o_fitted = fitted_state_het.dynamics.I_o.value.flatten()
+    w_fitted = get_val(fitted_state_het.dynamics.w).flatten()
+    I_o_fitted = get_val(fitted_state_het.dynamics.I_o).flatten()
 
     # Get global optimization values for reference
-    w_global = fitted_state.dynamics.w.value
-    I_o_global = fitted_state.dynamics.I_o  # Not optimized in global fit, but initial value
+    w_global = get_val(fitted_state.dynamics.w)
+    I_o_global = get_val(fitted_state.dynamics.I_o)  # Not optimized in global fit, but initial value
 
     # Create figure
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.1, 3.24))
