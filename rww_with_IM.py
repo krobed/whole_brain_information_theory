@@ -77,8 +77,28 @@ ATOM_INDEX = {
     "sts": 15,
 }
 
+def get_label(measure, order=2):
+    if measure == 'FC':
+        return 'Conectividad Funcional'
+    elif measure == 'TE':
+        return 'Transfer Entropy'
+    elif measure == 'WMS':
+        return "$\Phi^{WMS}$"
+    elif measure == 'PhiR':
+        return "$\Phi^R$"
+    elif measure == 'S':
+        return 'Sinergia'
+    elif measure == 'R':
+        return 'Redundancia'
+    elif measure == 'PhiG':
+        return "$\Phi^G$"
+    elif measure == 'CD':
+        return "Causal Density"
+    elif measure == 'Oinfo':
+        return f'O-information {order}-tupla'
 
-def compute_metric(name, data, skip_t=20, order = 2):
+
+def compute_metric(name, data, skip_t=20, order = 3):
     if name == 'FC':
         return compute_fc(data,skip_t=skip_t)
     elif name == 'TE':
@@ -96,7 +116,7 @@ def compute_metric(name, data, skip_t=20, order = 2):
     elif name == 'CD':
         atoms = {"Causal Density": {"add": ["u1tr","u1tu2","u2tr","u2tu1","stu1","stu2","str","str"],"sub": []}}
     elif name == 'Oinfo':
-        return get_Oinfo(data, minsize=3, maxsize=order)
+        return get_Oinfo(data, minsize=order, maxsize=order)
     else:
         return "Name didn't match any configuration"
     return compute_phiid_measures(data, ATOM_INDEX, atoms)[list(atoms.keys())[0]]
@@ -109,7 +129,7 @@ if __name__ == '__main__':
     order = args.order
     con_state = args.state
     
-    os.makedirs(f"results/{measure}", exist_ok=True)
+    os.makedirs(f"results/{measure}/{order}", exist_ok=True)
     # --- Detect environment ---
     if "google.colab" in sys.modules:
         base_path = "/content/cmha_data"
@@ -209,7 +229,7 @@ if __name__ == '__main__':
     cbar2 = fig.colorbar(im2, ax=ax2, shrink=0.74, label="Tract Length [mm]")
 
     plt.tight_layout()
-    plt.savefig(f"results/{measure}/structural_conn.png")
+    plt.savefig(f"results/{measure}/{order}/structural_conn.png")
 
     graph = DenseGraph(conn.weights, region_labels=conn.region_labels)
     dynamics = ReducedWongWang(w=0.3, I_o=0.32, INITIAL_STATE=(0.3,))
@@ -265,10 +285,10 @@ if __name__ == '__main__':
         color = cmap(norm(mean_values[i]))
         ax1.plot(time_raw, data_raw[:, i], color=color, linewidth=0.5)
 
-    ax1.text(0.95, 0.95, "Raw Neural Activity", transform=ax1.transAxes, fontsize=10,
+    ax1.text(0.95, 0.95, "Actividad neuronal", transform=ax1.transAxes, fontsize=10,
             ha='right', va='top', bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
-    ax1.set_xlabel("Time [ms]")
-    ax1.set_ylabel("S [a.u.]")
+    ax1.set_xlabel("Tiempo [ms]")
+    ax1.set_ylabel("S [u. a.]")
 
     # Plot BOLD signal (first 60 TRs)
     t_bold_max = 60
@@ -282,13 +302,13 @@ if __name__ == '__main__':
         color = cmap(norm(mean_values[i]))
         ax2.plot(time_bold, data_bold[:, i], color=color, linewidth=0.8)
 
-    ax2.text(0.95, 0.95, "BOLD Signal", transform=ax2.transAxes, fontsize=10,
+    ax2.text(0.95, 0.95, "Señal BOLD", transform=ax2.transAxes, fontsize=10,
             ha='right', va='top', bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
-    ax2.set_xlabel("Time [s]")
-    ax2.set_ylabel("BOLD [a.u.]")
+    ax2.set_xlabel("Tiempo [s]")
+    ax2.set_ylabel("BOLD [u. a.]")
 
     plt.tight_layout()
-    plt.savefig(f"results/{measure}/bold_signal.png")
+    plt.savefig(f"results/{measure}/{order}/bold_signal.png")
 
     if measure == 'FC':        
         fc_target = np.corrcoef(all_states[con_state][1].T)
@@ -301,7 +321,9 @@ if __name__ == '__main__':
     def differentiable_metric_callback(data_array):
         """Wraps the pure callback so JAX handles it normally during forward passes."""
         def callback_worker(data_np):
-            return compute_metric(measure, data_np, order=order)
+            res = compute_metric(measure, data_np, order=order)
+            # Ensure the worker explicitly returns float64 matching expected_struct
+            return np.asarray(res, dtype=np.float64)
             
         expected_struct = jax.ShapeDtypeStruct(
             shape=fc_target.shape,
@@ -323,45 +345,45 @@ if __name__ == '__main__':
 
     def differentiable_metric_callback_bwd(res, cotangent):
         """
-        res: data_array from the simulation -> shape (90, 82)
-        cotangent: incoming gradient from the loss function -> shape matches fc_target (e.g., 82, 82)
+        res: data_array from the simulation -> shape (Time, Nodes), e.g. (90, 82)
+        cotangent: incoming gradient from the loss function
+                - For FC: shape (82, 82)
+                - For O-info / HOI: shape (88560,) or higher-dimensional tensor
         """
         data_array = res
-        epsilon = 1  # Step size for numerical finite difference
+        epsilon = 1  # Slightly smaller step size for stable finite-difference grads
         
-        # --- STEP 1: Dynamically Map Cotangent to (Time, Nodes) Space ---
-        # Instead of a static flat mean, we project the loss gradients back 
-        # into the time-domain using the data_array's temporal profile.
-        if cotangent.ndim >= 2:
-            # If cotangent is (82, 82), multiply with data_array (90, 82) 
-            # to map spatial errors back to temporal variations: (90, 82) @ (82, 82) -> (90, 82)
+        # --- STEP 1: Dynamically handles matrix vs multi-dimensional/flat cotangents ---
+        if cotangent.shape == (data_array.shape[1], data_array.shape[1]):
+            # Standard FC Matrix Case: (90, 82) @ (82, 82) -> (90, 82)
             gradient_time_series = jnp.matmul(data_array, cotangent)
         else:
-            # If cotangent is flat (e.g., HOI metrics or O-info vectors), 
-            # we project it dynamically using the temporal variance of each node.
-            # This ensures we perturb the dynamic features (variance) the metrics care about.
-            std_devs = jnp.std(data_array, axis=0, keepdims=True)  # (1, 82)
-            mean_gradient = jnp.mean(cotangent)
-            gradient_time_series = data_array * (mean_gradient / (std_devs + 1e-8))
+            # Higher-Order / O-Information Case: cotangent is multi-dimensional or flat
+            # 1. Take mean loss gradient across all evaluated combinations/tuples
+            mean_cotangent = jnp.mean(cotangent)
+            
+            # 2. Scale time series using node-wise temporal variation/std dev
+            node_stds = jnp.std(data_array, axis=0, keepdims=True)  # Shape (1, 82)
+            gradient_time_series = data_array * (mean_cotangent / (node_stds + 1e-8))
 
-        # Normalize the perturbation vector so we don't explode or underflow the simulation space
+        # Normalize the perturbation vector to maintain simulation stability
         grad_norm = jnp.linalg.norm(gradient_time_series) + 1e-8
         perturbation = (gradient_time_series / grad_norm) * jnp.std(data_array)
 
-        # --- STEP 2: Perturb over space AND time ---
+        # --- STEP 2: Spatial & Temporal Perturbation ---
         perturbed_data = data_array + epsilon * perturbation
         
         # --- STEP 3: Forward evaluations ---
         perturbed_out = differentiable_metric_callback(perturbed_data)
         primal_out = differentiable_metric_callback(data_array)
         
-        # --- STEP 4: Project back to the exact shape of the simulation input ---
+        # --- STEP 4: Compute VJP output matching simulation shape (90, 82) ---
         delta_metric = (perturbed_out - primal_out) / epsilon
-    
-        # Print diagnostic (this should now show non-zero values!)
-        jax.debug.print("Max gradient value in backward pass: {x}", x=jnp.max(jnp.abs(delta_metric)))
         
-        # Backpropagate the dynamic changes to the parameters
+        # Debug print diagnostic
+        jax.debug.print("Max metric gradient value: {x}", x=jnp.max(jnp.abs(delta_metric)))
+        
+        # Project delta_metric safely back into time-series dimensions
         vjp_out = jnp.ones_like(data_array) * jnp.mean(delta_metric)
         return (vjp_out,)
 
@@ -404,7 +426,7 @@ if __name__ == '__main__':
         fc = observation(state)
         return rmse(fc, fc_target)
    
-
+    label = get_label(measure, order)
 
     # Calculate initial FC
     fc_initial = np.array(observation(state))
@@ -413,7 +435,7 @@ if __name__ == '__main__':
     fig, (ax1, ax2) = plt.subplots(1, 2)
 
     # Plot both FC matrices
-    for ax_current, fc_matrix, title_prefix in zip([ax1, ax2], [fc_target, fc_initial], ["Target FC", "Initial FC"]):
+    for ax_current, fc_matrix, title_prefix in zip([ax1, ax2], [np.corrcoef(all_states[con_state][1].T),compute_fc(bold_monitor(model(state)), skip_t=20)], [f"Target FC", f"Initial FC"]):
         fc_matrix = np.copy(fc_matrix)
         np.fill_diagonal(fc_matrix, np.nan)  # Set diagonal to NaN
         im = ax_current.imshow(fc_matrix, cmap='cividis')
@@ -422,11 +444,11 @@ if __name__ == '__main__':
         ax_current.set_yticks([])
         ax_current.set_xlabel('')
         ax_current.set_ylabel('')
-
+        
         # Calculate correlation for title
         if title_prefix == "Initial FC":
             corr_value = fc_corr(fc_initial, fc_target)
-            title = f"{title_prefix}\nr = {corr_value:.3f}"
+            title = f"{label} inicial\nr = {corr_value:.3f}"
         else:
             title = title_prefix
 
@@ -441,14 +463,14 @@ if __name__ == '__main__':
                                     facecolor='white', alpha=0.9))
 
     plt.tight_layout()
-    plt.savefig(f"results/{measure}/initial_corr.png")
+    plt.savefig(f"results/{measure}/{order}/initial_corr.png")
     # Create grid for parameter exploration
     n = 16
 
     # Set up parameter axes for exploration
     grid_state = copy.deepcopy(state)
-    grid_state.dynamics.w = GridAxis(0.001, 1.0, n)
-    grid_state.coupling.instant.G = GridAxis(0.001, 1.0, n)
+    grid_state.dynamics.w = GridAxis(-1.0, 1.0, n)
+    grid_state.coupling.instant.G = GridAxis(-1.0, 1.0, n)
 
     # Create space (product creates all combinations of w and G)
     grid = Space(grid_state, mode="product")
@@ -485,13 +507,13 @@ if __name__ == '__main__':
                 interpolation='none')
 
     # Add colorbar and labels
-    cbar = plt.colorbar(im, label="Loss (RMSE)")
-    ax.set_xlabel('Global Coupling (G)')
-    ax.set_ylabel('Excitatory Recurrence (w)')
-    ax.set_title("Parameter Exploration")
+    cbar = plt.colorbar(im, label="Error (RMSE)")
+    ax.set_xlabel('Acoplamiento Global (G)')
+    ax.set_ylabel('Recurrencia Excitatoria (w)')
+    ax.set_title("Exploración Paramétrica")
 
     plt.tight_layout()
-    plt.savefig(f"results/{measure}/expl_results.png")
+    plt.savefig(f"results/{measure}/{order}/expl_results.png")
 
     # Mark parameters as optimizable
     state.coupling.instant.G = Parameter(state.coupling.instant.G)
@@ -508,25 +530,28 @@ if __name__ == '__main__':
         fitted_state, fitting_data = opt.run(state, max_steps=1000)
         return fitted_state, fitting_data
 
-    fitted_state, fitting_data = optimize()
+    fitted_state, fitting_data  = optimize()
 
-# Locate the block where you extract G_route and w_route and update it to:
+    def get_val(param):
+        if hasattr(param, 'value'):
+            return np.array(param.value)
+        return np.array(param)
     
     # 1. Extract raw parameters from fitting data
-    raw_G_route = np.array([ds.coupling.instant.G.value for ds in fitting_data["state"].save])
-    raw_w_route = np.array([ds.dynamics.w.value for ds in fitting_data["state"].save])
+    raw_G_route = np.array([get_val(ds.coupling.instant.G) for ds in fitting_data["state"].save])
+    raw_w_route = np.array([get_val(ds.dynamics.w) for ds in fitting_data["state"].save])
     
     # 2. Map raw parameters back to the constrained physical space used by the model
     # (Sigmoid transformations to match your observation constraints)
-    G_route = 1.0 * (1.0 / (1.0 + np.exp(-raw_G_route)))
-    w_route = 1.5 * (1.0 / (1.0 + np.exp(-raw_w_route)))
+    G_route = raw_G_route
+    w_route = raw_w_route
     
     # 3. Apply the same mapping to the single "Initial" and "Optimized" markers
-    G_init = 1.0 * (1.0 / (1.0 + np.exp(-state.coupling.instant.G.value)))
-    w_init = 1.5 * (1.0 / (1.0 + np.exp(-state.dynamics.w.value)))
+    G_init = get_val(state.coupling.instant.G)
+    w_init = get_val(state.dynamics.w)
     
-    G_fit = 1.0 * (1.0 / (1.0 + np.exp(-fitted_state.coupling.instant.G.value)))
-    w_fit = 1.5 * (1.0 / (1.0 + np.exp(-fitted_state.dynamics.w.value)))
+    G_fit = get_val(fitted_state.coupling.instant.G)
+    w_fit = get_val(fitted_state.dynamics.w)
 
     # --- Plotting Code ---
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -542,14 +567,14 @@ if __name__ == '__main__':
     # Draw the corrected, mapped routes and endpoints
     ax.scatter(G_init, w_init, color='white', s=100, marker='o',
             edgecolors='k', linewidths=2, zorder=5)
-    ax.annotate('Initial', xy=(G_init, w_init),
+    ax.annotate('Inicial', xy=(G_init, w_init),
                 xytext=(G_init, w_init+0.05*(w_max-w_min)),
                 color='white', fontweight='bold', ha='center', zorder=5,
                 path_effects=[path_effects.withStroke(linewidth=3, foreground='black')])
 
     ax.scatter(G_fit, w_fit, color='white', s=100, marker='o',
             edgecolors='k', linewidths=2, zorder=5)
-    ax.annotate('Optimized', xy=(G_fit, w_fit),
+    ax.annotate('Optimizado', xy=(G_fit, w_fit),
                 xytext=(G_fit, w_fit-0.08*(w_max-w_min)),
                 color='white', fontweight='bold', ha='center', zorder=5,
                 path_effects=[path_effects.withStroke(linewidth=3, foreground='black')])
@@ -560,11 +585,11 @@ if __name__ == '__main__':
 
     # Retain your custom axis limit rules
 
-    ax.set_xlabel('Global Coupling (G)')
-    ax.set_ylabel('Excitatory Recurrence (w)')
+    ax.set_xlabel('Acoplamiento Global (G)')
+    ax.set_ylabel('Recurrencia Excitatoria (w)')
 
     plt.tight_layout()
-    plt.savefig(f"results/{measure}/global_optimization.png")
+    plt.savefig(f"results/{measure}/{order}/global_optimization.png")
 
     fitted_state_het = copy.deepcopy(fitted_state)
 
@@ -576,7 +601,7 @@ if __name__ == '__main__':
     fitted_state_het.dynamics.I_o.shape = (82,)
 
     # Keep global coupling fixed at optimized value
-    fitted_state_het.coupling.instant.G = fitted_state_het.coupling.instant.G.value
+    fitted_state_het.coupling.instant.G = get_val(fitted_state_het.coupling.instant.G)
 
     show_parameters(fitted_state_het)
 
@@ -593,13 +618,12 @@ if __name__ == '__main__':
     fc_global = np.array(observation(fitted_state))
     fc_regional = np.array(observation(fitted_state_het))
 
-    # %%
 
     # Create the figure with three subplots
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(8.1, 3.54375))
 
     # Plot the FC matrices
-    for ax_current, fc_matrix, title_prefix in zip([ax1, ax2, ax3], [fc_target, fc_global, fc_regional], ["Target FC", "Global Parameters", "Regional Parameters"]):
+    for ax_current, fc_matrix, title_prefix in zip([ax1, ax2, ax3], [np.corrcoef(all_states[con_state][1].T), compute_fc(bold_monitor(model(fitted_state)), skip_t=20), compute_fc(bold_monitor(model(fitted_state_het)), skip_t=20)], ["Target FC", "Global Parameters", "Regional Parameters"]):
         fc_matrix = np.copy(fc_matrix)
         np.fill_diagonal(fc_matrix, np.nan)  # Set diagonal to NaN
         im = ax_current.imshow(fc_matrix, cmap='cividis')
@@ -611,19 +635,19 @@ if __name__ == '__main__':
 
         # Calculate correlation for title (if not target)
         if title_prefix == "Target FC":
-            title = title_prefix
+            title = f"{label} Objetivo"
         elif title_prefix == "Global Parameters":
             corr_value = fc_corr(fc_global, fc_target)
-            title = f"{title_prefix}\nr = {corr_value:.3f}"
+            title = f"Parámetros Globales\nr = {corr_value:.3f}"
         else:
             corr_value = fc_corr(fc_regional, fc_target)
-            title = f"{title_prefix}\nr = {corr_value:.3f}"
+            title = f"Parámetros Regionales\nr = {corr_value:.3f}"
 
         # Set title
         ax_current.set_title(title, fontsize=10, fontweight='bold')
 
     plt.tight_layout()
-    plt.savefig(f"results/{measure}/global_regional_results.png")
+    plt.savefig(f"results/{measure}/{order}/global_regional_results.png")
 
     # Create figure with two scatter plots
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8.1, 5.4), sharey=True, sharex=True)
@@ -642,9 +666,9 @@ if __name__ == '__main__':
             [fc_target_triu.min(), fc_target_triu.max()],
             'k--', linewidth=1.5, label='Perfect fit')
     corr_global = fc_corr(fc_global, fc_target)
-    ax1.set_xlabel('Empirical FC')
-    ax1.set_ylabel('Simulated FC')
-    ax1.set_title(f'Global Parameters\nr = {corr_global:.3f}')
+    ax1.set_xlabel(f'{label} Empirica')
+    ax1.set_ylabel(f'{label} Simulada')
+    ax1.set_title(f'Parámetros Globales\nr = {corr_global:.3f}')
     ax1.grid(True, alpha=0.3)
     ax1.set_aspect('equal', adjustable='box')
 
@@ -654,21 +678,18 @@ if __name__ == '__main__':
             [fc_target_triu.min(), fc_target_triu.max()],
             'k--', linewidth=1.5, label='Perfect fit')
     corr_regional = fc_corr(fc_regional, fc_target)
-    ax2.set_xlabel('Empirical FC')
-    ax2.set_ylabel('Simulated FC')
-    ax2.set_title(f'Regional Parameters\nr = {corr_regional:.3f}')
+    ax2.set_xlabel(f'{label} Empírica')
+    ax2.set_ylabel(f'{label} Simulada')
+    ax2.set_title(f'Parametros Regionales\nr = {corr_regional:.3f}')
     ax2.grid(True, alpha=0.3)
     ax2.set_aspect('equal', adjustable='box')
 
     plt.tight_layout()
-    plt.savefig(f"results/{measure}/FC_final.png")
+    plt.savefig(f"results/{measure}/{order}/FC_final.png")
 
     # Calculate mean incoming connectivity for each region
     mean_connectivity = np.mean(conn.weights, axis=1)
-    def get_val(param):
-        if hasattr(param, 'value'):
-            return np.array(param.value)
-        return np.array(param)
+    
     
     # Extract fitted regional parameters
     w_fitted = get_val(fitted_state_het.dynamics.w).flatten()
@@ -684,21 +705,21 @@ if __name__ == '__main__':
     # Plot w vs mean connectivity
     ax1.scatter(mean_connectivity, w_fitted, alpha=0.7, s=30, color='royalblue', edgecolors='k', linewidths=0.5)
     ax1.axhline(w_global, color='red', linestyle='--', linewidth=2, label=f'Global w = {w_global:.3f}')
-    ax1.set_xlabel('Mean Incoming Connectivity')
-    ax1.set_ylabel('Fitted w (Excitatory Recurrence)')
-    ax1.set_title('Regional Excitatory Recurrence Parameters')
+    ax1.set_xlabel('Conectividad Entrante Promedio')
+    ax1.set_ylabel('w Optimizado (Recurrencia Excitatoria)')
+    ax1.set_title('Parámetros de Recurrencia Excitatoria Regional')
     ax1.legend(loc='best')
     ax1.grid(True, alpha=0.3)
 
     # Plot I_o vs mean connectivity
     ax2.scatter(mean_connectivity, I_o_fitted, alpha=0.7, s=30, color='royalblue', edgecolors='k', linewidths=0.5)
     ax2.axhline(I_o_global, color='red', linestyle='--', linewidth=2, label=f'Initial I_o = {I_o_global:.3f}')
-    ax2.set_xlabel('Mean Incoming Connectivity')
-    ax2.set_ylabel('Fitted I_o (External Input)')
-    ax2.set_title('Regional External Input Parameters')
+    ax2.set_xlabel('Conectividad Entrante Promedio')
+    ax2.set_ylabel('$I_o$ Optimizado (Input Externo)')
+    ax2.set_title('Parámetros de Input Externo Regional')
     ax2.legend(loc='best')
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(f"results/{measure}/weight_results.png")
+    plt.savefig(f"results/{measure}/{order}/weight_results.png")
 
