@@ -345,46 +345,59 @@ if __name__ == '__main__':
 
     def differentiable_metric_callback_bwd(res, cotangent):
         """
-        res: data_array from the simulation -> shape (Time, Nodes), e.g. (90, 82)
-        cotangent: incoming gradient from the loss function
-                - For FC: shape (82, 82)
-                - For O-info / HOI: shape (88560,) or higher-dimensional tensor
+        res: data_array from simulation -> shape (Time, Nodes), e.g. (90, 82)
+        cotangent: incoming gradient from loss function
         """
         data_array = res
-        epsilon = 1  # Slightly smaller step size for stable finite-difference grads
         
-        # --- STEP 1: Dynamically handles matrix vs multi-dimensional/flat cotangents ---
-        if cotangent.shape == (data_array.shape[1], data_array.shape[1]):
-            # Standard FC Matrix Case: (90, 82) @ (82, 82) -> (90, 82)
-            gradient_time_series = jnp.matmul(data_array, cotangent)
+        # 1. Scale perturbation step to match data standard deviation
+        data_std = jnp.std(data_array)
+        eps = jnp.where(data_std > 0, 0.05 * data_std, 0.01)
+        
+        # 2. Build directional perturbation vector matching data_array shape (90, 82)
+        if cotangent.ndim == 2 and cotangent.shape == (data_array.shape[1], data_array.shape[1]):
+            # Standard FC matrix case
+            direction = jnp.matmul(data_array, cotangent)
         else:
-            # Higher-Order / O-Information Case: cotangent is multi-dimensional or flat
-            # 1. Take mean loss gradient across all evaluated combinations/tuples
-            mean_cotangent = jnp.mean(cotangent)
-            
-            # 2. Scale time series using node-wise temporal variation/std dev
-            node_stds = jnp.std(data_array, axis=0, keepdims=True)  # Shape (1, 82)
-            gradient_time_series = data_array * (mean_cotangent / (node_stds + 1e-8))
+            # HOI / O-information flat/tensor case
+            node_vars = jnp.var(data_array, axis=0, keepdims=True)  # Shape (1, 82)
+            direction = data_array * (node_vars / (jnp.mean(node_vars) + 1e-8))
 
-        # Normalize the perturbation vector to maintain simulation stability
-        grad_norm = jnp.linalg.norm(gradient_time_series) + 1e-8
-        perturbation = (gradient_time_series / grad_norm) * jnp.std(data_array)
+        # Normalize directional perturbation array to unit norm
+        dir_norm = jnp.linalg.norm(direction) + 1e-8
+        unit_dir = direction / dir_norm
 
-        # --- STEP 2: Spatial & Temporal Perturbation ---
-        perturbed_data = data_array + epsilon * perturbation
+        # 3. Two-Sided Finite Difference Evaluation
+        pos_data = data_array + eps * unit_dir
+        neg_data = data_array - eps * unit_dir
         
-        # --- STEP 3: Forward evaluations ---
-        perturbed_out = differentiable_metric_callback(perturbed_data)
-        primal_out = differentiable_metric_callback(data_array)
+        pos_out = differentiable_metric_callback(pos_data)
+        neg_out = differentiable_metric_callback(neg_data)
         
-        # --- STEP 4: Compute VJP output matching simulation shape (90, 82) ---
-        delta_metric = (perturbed_out - primal_out) / epsilon
+        # delta_metric will have shape matching metric output (e.g. 88560, 1 or 88560,)
+        delta_metric = (pos_out - neg_out) / (2.0 * eps)
         
-        # Debug print diagnostic
-        jax.debug.print("Max metric gradient value: {x}", x=jnp.max(jnp.abs(delta_metric)))
-        
-        # Project delta_metric safely back into time-series dimensions
-        vjp_out = jnp.ones_like(data_array) * jnp.mean(delta_metric)
+        # 4. Collapse delta_metric to a SCALAR so it can scale unit_dir cleanly
+        if cotangent.shape == delta_metric.shape:
+            scalar_grad = jnp.sum(delta_metric * cotangent)
+        else:
+            scalar_grad = jnp.mean(delta_metric)
+
+        # Calculate magnitude safely in 0-D scalar space
+        grad_mag = jnp.abs(scalar_grad)
+
+        # 5. Fallback/Floor check executed strictly in SCALAR space
+        # Notice how both branches (scalar_grad and 0.01) are now simple numbers!
+        effective_scalar_grad = jnp.where(
+            grad_mag > 1e-9, 
+            scalar_grad, 
+            0.01  
+        )
+
+        jax.debug.print("Metric gradient scalar value in backward pass: {x}", x=effective_scalar_grad)
+
+        # 6. Return gradient matching data_array shape: (90, 82)
+        vjp_out = unit_dir * effective_scalar_grad
         return (vjp_out,)
 
 
